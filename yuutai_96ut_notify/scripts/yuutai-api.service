@@ -1,0 +1,35 @@
+# systemd service file for 株主優待API
+# 配置先: /etc/systemd/system/yuutai-api.service
+#
+# インストール手順:
+#   sudo cp yuutai-api.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable yuutai-api
+#   sudo systemctl start yuutai-api
+
+[Unit]
+Description=Yuutai API Server (株主優待データ取得API)
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/projects/aitool/yuutai_96ut_notify/scripts
+Environment="PATH=/home/ubuntu/projects/aitool/yuutai_96ut_notify/venv/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="HOST=127.0.0.1"
+Environment="PORT=8000"
+ExecStart=/home/ubuntu/projects/aitool/yuutai_96ut_notify/venv/bin/python api.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# セキュリティ設定
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/ubuntu/projects/aitool/yuutai_96ut_notify
+
+[Install]
+WantedBy=multi-user.target

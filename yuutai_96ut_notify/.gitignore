@@ -3,3 +3,10 @@ fixtures/*.html
 
 # n8n ワークフローのバックアップ（必要に応じてコミット）
 # n8n/*.json.bak
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.env

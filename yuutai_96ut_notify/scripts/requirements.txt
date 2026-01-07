@@ -1,0 +1,16 @@
+# 株主優待データ取得API
+# Python 3.9+
+
+# Web framework
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+
+# HTTP client
+requests>=2.31.0
+
+# HTML parsing
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+
+# Utilities
+python-dotenv>=1.0.0
