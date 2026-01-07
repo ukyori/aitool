@@ -1,0 +1,419 @@
+{
+  "name": "株主優待 Google Sheets 同期",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "30 6 * * *"
+            }
+          ]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.API_ENDPOINT }}/yuutai/all",
+        "options": {
+          "timeout": 120000,
+          "retry": {
+            "enabled": true,
+            "maxRetries": 3,
+            "retryInterval": 5000
+          }
+        }
+      },
+      "id": "http-request-api",
+      "name": "Fetch Yuutai Data",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [220, 0],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "condition-success",
+              "leftValue": "={{ $json.error }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "empty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-success",
+      "name": "IF Success",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// format_for_sheets.js\n// Python APIからのデータを整形し、Google Sheets用に変換\n\nconst crypto = require('crypto');\n\nfunction generateHash(obj) {\n  const source = [\n    obj.code || '',\n    obj.name || '',\n    obj.rights_date || '',\n    obj.yuutai_summary || '',\n    obj.lend_type || '',\n    obj.measures || '',\n    obj.saiyaku || ''\n  ].join('|');\n  return crypto.createHash('md5').update(source).digest('hex').substring(0, 16);\n}\n\nfunction getJstNow() {\n  const now = new Date();\n  const jstOffset = 9 * 60 * 60 * 1000;\n  const jstNow = new Date(now.getTime() + jstOffset);\n  return jstNow.toISOString().replace('T', ' ').substring(0, 19);\n}\n\nconst inputData = $input.first().json;\nconst rows = inputData.data || inputData.rows || inputData;\n\nif (!Array.isArray(rows)) {\n  throw new Error('入力データが配列ではありません: ' + typeof rows);\n}\n\nconst now = getJstNow();\nconst formattedRows = [];\n\nfor (const row of rows) {\n  const primaryKey = `${row.code}_${row.rights_date}`;\n  const rowHash = generateHash(row);\n  \n  formattedRows.push({\n    primary_key: primaryKey,\n    code: row.code || '',\n    name: row.name || '',\n    rights_date: row.rights_date || '',\n    yuutai_summary: row.yuutai_summary || row.summary || '',\n    lend_type: row.lend_type || '',\n    measures: row.measures || '',\n    saiyaku: row.saiyaku || '',\n    row_hash: rowHash,\n    source_url: row.source_url || '',\n    fetched_at: now\n  });\n}\n\nreturn [{\n  json: {\n    rows: formattedRows,\n    total_count: formattedRows.length,\n    fetched_at: now\n  }\n}];"
+      },
+      "id": "code-format",
+      "name": "Format for Sheets",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, -100]
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $env.SHEET_ID }}"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "優待一覧"
+        },
+        "options": {
+          "returnAll": true
+        }
+      },
+      "id": "sheets-get-all",
+      "name": "Get Existing Data",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [880, -100],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "CREDENTIAL_ID",
+          "name": "Google Sheets OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// detect_changes.js\n// 新規・更新・削除を検出\n\nconst newData = $('Format for Sheets').first().json;\nconst existingItems = $('Get Existing Data').all();\n\nconst newRows = newData.rows || [];\nconst existingMap = new Map();\n\n// 既存データをMapに格納\nfor (const item of existingItems) {\n  const key = item.json.primary_key;\n  if (key) {\n    existingMap.set(key, item.json);\n  }\n}\n\nconst toAdd = [];\nconst toUpdate = [];\nconst unchanged = [];\n\nconst now = newData.fetched_at;\n\nfor (const row of newRows) {\n  const existing = existingMap.get(row.primary_key);\n  \n  if (!existing) {\n    // 新規追加\n    toAdd.push({\n      ...row,\n      created_at: now,\n      updated_at: now\n    });\n  } else if (existing.row_hash !== row.row_hash) {\n    // 更新（ハッシュが変わった）\n    toUpdate.push({\n      ...row,\n      created_at: existing.created_at || now,\n      updated_at: now\n    });\n  } else {\n    // 変更なし\n    unchanged.push(row.primary_key);\n  }\n  \n  // 処理済みとしてMapから削除\n  existingMap.delete(row.primary_key);\n}\n\n// Mapに残っているのは削除候補（今回取得されなかったもの）\nconst possiblyDeleted = Array.from(existingMap.keys());\n\nconst hasChanges = toAdd.length > 0 || toUpdate.length > 0;\n\nreturn [{\n  json: {\n    has_changes: hasChanges,\n    summary: {\n      new_count: toAdd.length,\n      updated_count: toUpdate.length,\n      unchanged_count: unchanged.length,\n      possibly_deleted_count: possiblyDeleted.length\n    },\n    to_add: toAdd,\n    to_update: toUpdate,\n    possibly_deleted: possiblyDeleted,\n    fetched_at: now\n  }\n}];"
+      },
+      "id": "code-detect-changes",
+      "name": "Detect Changes",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, -100]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "condition-has-changes",
+              "leftValue": "={{ $json.has_changes }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-has-changes",
+      "name": "IF Has Changes",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1320, -100]
+    },
+    {
+      "parameters": {
+        "jsCode": "// prepare_upsert.js\n// 追加・更新データを個別アイテムに展開\n\nconst data = $input.first().json;\nconst allRows = [...(data.to_add || []), ...(data.to_update || [])];\n\nreturn allRows.map(row => ({ json: row }));"
+      },
+      "id": "code-prepare-upsert",
+      "name": "Prepare Upsert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1540, -200]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $env.SHEET_ID }}"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "優待一覧"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "primary_key": "={{ $json.primary_key }}",
+            "code": "={{ $json.code }}",
+            "name": "={{ $json.name }}",
+            "rights_date": "={{ $json.rights_date }}",
+            "yuutai_summary": "={{ $json.yuutai_summary }}",
+            "lend_type": "={{ $json.lend_type }}",
+            "measures": "={{ $json.measures }}",
+            "saiyaku": "={{ $json.saiyaku }}",
+            "row_hash": "={{ $json.row_hash }}",
+            "source_url": "={{ $json.source_url }}",
+            "fetched_at": "={{ $json.fetched_at }}",
+            "updated_at": "={{ $json.updated_at }}",
+            "created_at": "={{ $json.created_at }}"
+          }
+        },
+        "options": {
+          "matchingColumn": "primary_key"
+        }
+      },
+      "id": "sheets-upsert",
+      "name": "Upsert to Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [1760, -200],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "CREDENTIAL_ID",
+          "name": "Google Sheets OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// prepare_notification.js\n// 通知メッセージを生成\n\nconst changesData = $('Detect Changes').first().json;\nconst summary = changesData.summary;\nconst fetchedAt = changesData.fetched_at;\n\nconst newItems = changesData.to_add || [];\nconst updatedItems = changesData.to_update || [];\n\n// 新規追加の銘柄リスト（最大10件）\nlet newList = '';\nif (newItems.length > 0) {\n  const displayItems = newItems.slice(0, 10);\n  newList = displayItems.map(r => `・${r.code} ${r.name} (${r.rights_date})`).join('\\n');\n  if (newItems.length > 10) {\n    newList += `\\n...他${newItems.length - 10}件`;\n  }\n}\n\n// 更新の銘柄リスト（最大5件）\nlet updateList = '';\nif (updatedItems.length > 0) {\n  const displayItems = updatedItems.slice(0, 5);\n  updateList = displayItems.map(r => `・${r.code} ${r.name}`).join('\\n');\n  if (updatedItems.length > 5) {\n    updateList += `\\n...他${updatedItems.length - 5}件`;\n  }\n}\n\n// Discord Embed形式\nconst embed = {\n  title: '株主優待データ更新',\n  color: 3066993, // 緑\n  fields: [\n    {\n      name: '新規追加',\n      value: summary.new_count + '件',\n      inline: true\n    },\n    {\n      name: '更新',\n      value: summary.updated_count + '件',\n      inline: true\n    },\n    {\n      name: '取得日時',\n      value: fetchedAt,\n      inline: true\n    }\n  ],\n  footer: {\n    text: '96ut.com 株主優待同期'\n  }\n};\n\nif (newList) {\n  embed.fields.push({\n    name: '新規追加銘柄',\n    value: '```\\n' + newList + '\\n```',\n    inline: false\n  });\n}\n\nif (updateList) {\n  embed.fields.push({\n    name: '更新銘柄',\n    value: '```\\n' + updateList + '\\n```',\n    inline: false\n  });\n}\n\nreturn [{\n  json: {\n    content: null,\n    embeds: [embed]\n  }\n}];"
+      },
+      "id": "code-prepare-notification",
+      "name": "Prepare Notification",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1980, -200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.DISCORD_WEBHOOK_URL }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      },
+      "id": "discord-notify",
+      "name": "Discord Notification",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2200, -200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// prepare_error_notification.js\n// エラー通知メッセージを生成\n\nconst errorData = $input.first().json;\nconst errorMessage = errorData.error?.message || errorData.message || JSON.stringify(errorData);\n\nconst now = new Date();\nconst jstOffset = 9 * 60 * 60 * 1000;\nconst jstNow = new Date(now.getTime() + jstOffset);\nconst timestamp = jstNow.toISOString().replace('T', ' ').substring(0, 19);\n\nconst embed = {\n  title: '株主優待同期エラー',\n  color: 15158332, // 赤\n  fields: [\n    {\n      name: 'エラー内容',\n      value: '```\\n' + errorMessage.substring(0, 500) + '\\n```',\n      inline: false\n    },\n    {\n      name: '発生日時',\n      value: timestamp,\n      inline: true\n    }\n  ],\n  footer: {\n    text: '要確認: n8n Executions でログを確認してください'\n  }\n};\n\nreturn [{\n  json: {\n    content: '@here エラーが発生しました',\n    embeds: [embed]\n  }\n}];"
+      },
+      "id": "code-error-notification",
+      "name": "Prepare Error Notification",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 100]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.DISCORD_WEBHOOK_URL }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      },
+      "id": "discord-error-notify",
+      "name": "Discord Error Notification",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, 100]
+    },
+    {
+      "parameters": {},
+      "id": "no-changes-end",
+      "name": "No Changes",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1540, 0]
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Fetch Yuutai Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Yuutai Data": {
+      "main": [
+        [
+          {
+            "node": "IF Success",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare Error Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Success": {
+      "main": [
+        [
+          {
+            "node": "Format for Sheets",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare Error Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format for Sheets": {
+      "main": [
+        [
+          {
+            "node": "Get Existing Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Existing Data": {
+      "main": [
+        [
+          {
+            "node": "Detect Changes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Detect Changes": {
+      "main": [
+        [
+          {
+            "node": "IF Has Changes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Has Changes": {
+      "main": [
+        [
+          {
+            "node": "Prepare Upsert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Changes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Upsert": {
+      "main": [
+        [
+          {
+            "node": "Upsert to Sheets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upsert to Sheets": {
+      "main": [
+        [
+          {
+            "node": "Prepare Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Notification": {
+      "main": [
+        [
+          {
+            "node": "Discord Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Error Notification": {
+      "main": [
+        [
+          {
+            "node": "Discord Error Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Tokyo",
+    "saveManualExecutions": true,
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all"
+  },
+  "tags": [
+    {
+      "name": "株主優待"
+    }
+  ]
+}
